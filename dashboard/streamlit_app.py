@@ -210,7 +210,7 @@ with colA:
 
 with colB:
     st.markdown('<div> </div>', unsafe_allow_html=True)
-    if st.button("Tendência de alta/baixa próx. 5 min", use_container_width=True, key="btn_predict"):
+    if st.button("Probabilidade de alta próx. 5 min", use_container_width=True, key="btn_predict"):
         status, body = api_call("/predict", timeout=12)
         if status == 200 and body.get("status") == "ok":
             st.metric("Probabilidade de Alta (5 min)", f"{body.get('proba_up_next_5', 0) * 100:.1f}%")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -16,9 +17,9 @@ from app.ingestor import fetch_btc_price, polite_sleep
 from app.features import load_prices, make_features
 from app.train import train_model
 
-# import opcional de predict_next (evita crash se não existir)
+# predict_next é opcional (evita crash se não existir)
 try:
-    from app.predict import predict_next as _predict_next  # type: ignore
+    from app.predict import predict_next as _predict_next  # type: ignore[attr-defined]
 except Exception:
     _predict_next = None
 
@@ -29,28 +30,23 @@ log = logging.getLogger("cryptopulse.api")
 # =============================================================================
 app = FastAPI(
     title="CryptoPulse API",
-    version="1.0",
+    version="1.1",
     description="API para coleta de preço BTC, treino/predição e operações em lote.",
 )
 
-ALLOW_ORIGINS = [
-    "https://*.streamlit.app",
-    "https://*.streamlit.io",
-    "http://localhost",
-    "http://localhost:*",
-    "http://127.0.0.1:*",
-    "*",  # ajuste conforme sua necessidade
-]
+# Suporte a *.streamlit.app via regex de origem
+ALLOW_ORIGIN_REGEX = r"^https:\/\/([a-z0-9-]+\.)*streamlit\.app$"
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOW_ORIGINS,
+    allow_origin_regex=ALLOW_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # =============================================================================
-# Modelos Pydantic (respostas)
+# Models (Pydantic)
 # =============================================================================
 class RootResp(BaseModel):
     name: str = "cryptopulse"
@@ -107,8 +103,15 @@ def _normalize_fetch_output(d: Any) -> Dict[str, Any]:
         ts = d.get("ts_utc") or _now_iso()
         price = float(d["price_usd"])
         return {"ts_utc": ts, "price_usd": price}
-    # float/int
     return {"ts_utc": _now_iso(), "price_usd": float(d)}
+
+
+def _do_one_ingest() -> Dict[str, Any]:
+    """Executa uma coleta e persiste (upsert)."""
+    raw = fetch_btc_price()
+    p = _normalize_fetch_output(raw)
+    upsert_price(p["ts_utc"], p["price_usd"])
+    return {"status": "ok", "ts_utc": p["ts_utc"], "price_usd": float(p["price_usd"])}
 
 
 # =============================================================================
@@ -119,7 +122,7 @@ def _startup():
     try:
         init_db()
         log.info("DB inicializado com sucesso")
-    except Exception:
+    except Exception:  # pragma: no cover
         log.exception("Falha ao inicializar DB")
 
 
@@ -131,26 +134,36 @@ def root():
     return RootResp(time_utc=_now_iso())
 
 
-@app.post("/ingest", response_model=IngestResp, tags=["default"], summary="Ingest Once")
+@app.post("/ingest_async", response_model=IngestResp, tags=["default"], summary="Dispara coleta em background")
+def ingest_async():
+    """Dispara uma coleta em *background* e responde imediatamente (evita timeout de cold start)."""
+    def _bg():
+        try:
+            _do_one_ingest()
+        except Exception:
+            log.exception("Falha no ingest_async")
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return IngestResp(status="accepted", msg="ingest agendado")
+
+
+@app.post("/ingest", response_model=IngestResp, tags=["default"], summary="Coleta 1 leitura (não bloqueia)")
 def ingest_once():
-    """Coleta preço atual e persiste (upsert por ts_utc)."""
+    """
+    Por padrão, delega para o background para evitar timeouts no cliente.
+    Se você quiser manter síncrono, troque o corpo por: `return IngestResp(**_do_one_ingest())`.
+    """
     try:
-        raw = fetch_btc_price()
-        p = _normalize_fetch_output(raw)  # garante ts_utc e price_usd
-        # ordem correta: ts primeiro, price depois
-        upsert_price(p["ts_utc"], p["price_usd"])
-        return IngestResp(status="ok", ts_utc=p["ts_utc"], price_usd=p["price_usd"])
+        threading.Thread(target=_do_one_ingest, daemon=True).start()
+        return IngestResp(status="accepted", msg="ingest em execução")
     except Exception as e:
-        log.exception("Falha no ingest_once")
+        log.exception("Falha ao agendar ingest")
         return IngestResp(status="error", msg=str(e))
 
 
 @app.post("/train", response_model=TrainResp, tags=["default"], summary="Train")
 def train():
-    """
-    Treina o modelo usando a base (mínimo definido no train_model()).
-    Retorna acurácia de teste e número de amostras.
-    """
+    """Treina o modelo (mínimo definido em train_model())."""
     try:
         res = train_model()
         return TrainResp(**res)
@@ -161,40 +174,28 @@ def train():
 
 @app.get("/predict", response_model=PredictResp, tags=["default"], summary="Predict")
 def predict():
-    """
-    Prediz probabilidade de alta nos próximos 5 minutos (se disponível).
-    Usa predict_next(payload) quando presente. Fallback: retorna mensagem.
-    """
+    """Prediz probabilidade de alta em 5min (se `predict_next` existir)."""
     try:
         if _predict_next is None:
             return PredictResp(status="error", msg="predict_next indisponível no servidor.")
-
-        # payload mínimo: horizon=5 (ajuste se necessário)
         payload = {"horizon": 5}
         res: Dict[str, Any] = _predict_next(payload)
-
-        # Tente mapear saídas comuns
         if "proba_up_next_5" in res:
             return PredictResp(status="ok", proba_up_next_5=float(res["proba_up_next_5"]))
-
-        # Alguns modelos retornam lista 'prediction' (prob ou valor)
         if "prediction" in res and isinstance(res["prediction"], list) and res["prediction"]:
             try:
                 return PredictResp(status="ok", proba_up_next_5=float(res["prediction"][0]))
             except Exception:
                 pass
-
-        # fallback: apenas confirme que rodou
         return PredictResp(status=res.get("status", "ok"), msg=res.get("msg", "predict_next executado."))
-
     except Exception as e:
         log.exception("Falha na predição")
         return PredictResp(status="error", msg=str(e))
 
 
-@app.get("/data/last", response_model=ListResp, tags=["default"], summary="Last")
+@app.get("/data/last", response_model=ListResp, tags=["default"], summary="Últimas leituras")
 def last(n: int = Query(300, ge=1, le=5000)):
-    """Retorna as últimas N leituras de preço ordenadas por timestamp (ASC)."""
+    """Retorna as últimas N leituras (ASC)."""
     try:
         with engine.begin() as c:
             rows = c.execute(
@@ -252,9 +253,8 @@ def _run_batch(n: int, delay: float) -> None:
             if not BATCH_STATE["running"]:
                 break
         try:
-            raw = fetch_btc_price()
-            p = _normalize_fetch_output(raw)
-            upsert_price(p["ts_utc"], p["price_usd"])  # ordem correta
+            p = _normalize_fetch_output(fetch_btc_price())
+            upsert_price(p["ts_utc"], p["price_usd"])
             _set(done=BATCH_STATE["done"] + 1)
         except Exception as e:
             log.exception("Falha em uma iteração do batch")
@@ -264,11 +264,7 @@ def _run_batch(n: int, delay: float) -> None:
     _set(running=False)
 
 
-@app.post(
-    "/ingest_batch",
-    tags=["Batch"],
-    summary="Inicia lote de coletas no servidor",
-)
+@app.post("/ingest_batch", tags=["Batch"], summary="Inicia lote no servidor")
 def ingest_batch(
     count: int = Query(60, ge=1, le=2000, description="Quantidade de coletas (1–2000)."),
     delay: float = Query(12.0, ge=1.0, le=600.0, description="Intervalo entre coletas (s)."),
@@ -280,11 +276,7 @@ def ingest_batch(
     return {"status": "started", "target": int(count), "delay": float(delay), "started_at": _now_iso()}
 
 
-@app.get(
-    "/batch/status",
-    tags=["Batch"],
-    summary="Consulta status atual do lote",
-)
+@app.get("/batch/status", tags=["Batch"], summary="Status do lote")
 def batch_status():
     with _BS_LOCK:
         state = dict(BATCH_STATE)
@@ -294,11 +286,7 @@ def batch_status():
     return {"status": "ok", "eta_seconds": eta_seconds, **state}
 
 
-@app.post(
-    "/batch/stop",
-    tags=["Batch"],
-    summary="Solicita parada graciosa do lote",
-)
+@app.post("/batch/stop", tags=["Batch"], summary="Parada graciosa do lote")
 def batch_stop():
     with _BS_LOCK:
         BATCH_STATE["running"] = False
@@ -306,11 +294,7 @@ def batch_stop():
     return {"status": "stopping", **BATCH_STATE}
 
 
-@app.post(
-    "/batch/reset",
-    tags=["Batch"],
-    summary="Reseta estado do lote (útil para testes/CI)",
-)
+@app.post("/batch/reset", tags=["Batch"], summary="Reset do estado do lote (testes/CI)")
 def batch_reset():
     with _BS_LOCK:
         BATCH_STATE.update(
