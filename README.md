@@ -7,6 +7,7 @@
 
 ### DASHBOARD: https://rabramo-cryptopulse-dashboardstreamlit-app-fvrftu.streamlit.app
 ### GITHUB: https://github.com/Rabramo/cryptopulse  
+### API DOCS: https://cryptopulse-okqa.onrender.com/docs
 ### YOUTUBE: 
 
 ## CRYPTOPULSE – BTC Nowcasting (FastAPI + Render + Neon + Streamlit Cloud)

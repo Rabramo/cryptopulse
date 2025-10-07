@@ -20,6 +20,10 @@ from app.predict import predict_next  # supondo existir (mantém seu contrato)
 
 log = logging.getLogger("cryptopulse.api")
 
+ts = p.get("ts_utc") or datetime.now(timezone.utc).isoformat()
+price = float(p["price_usd"])
+upsert_price(ts, price)
+
 # =============================================================================
 # App & CORS
 # =============================================================================
