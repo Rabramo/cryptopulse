@@ -1,7 +1,7 @@
+# app/api.py
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -9,20 +9,20 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
-
 from sqlalchemy import text
-from app.db import engine, init_db, upsert_price  # upsert_price já existe no projeto
+
+from app.db import engine, init_db, upsert_price
 from app.ingestor import fetch_btc_price, polite_sleep
 from app.features import load_prices, make_features
 from app.train import train_model
-from app.predict import predict_next  # supondo existir (mantém seu contrato)
+
+# import opcional de predict_next (evita crash se não existir)
+try:
+    from app.predict import predict_next as _predict_next  # type: ignore
+except Exception:
+    _predict_next = None
 
 log = logging.getLogger("cryptopulse.api")
-
-ts = p.get("ts_utc") or datetime.now(timezone.utc).isoformat()
-price = float(p["price_usd"])
-upsert_price(ts, price)
 
 # =============================================================================
 # App & CORS
@@ -33,14 +33,13 @@ app = FastAPI(
     description="API para coleta de preço BTC, treino/predição e operações em lote.",
 )
 
-# CORS: libera Streamlit Cloud e desenvolvimento local
 ALLOW_ORIGINS = [
     "https://*.streamlit.app",
     "https://*.streamlit.io",
     "http://localhost",
     "http://localhost:*",
     "http://127.0.0.1:*",
-    "*",  # deixe mais restrito se desejar
+    "*",  # ajuste conforme sua necessidade
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -92,6 +91,27 @@ class ListResp(BaseModel):
 
 
 # =============================================================================
+# Helpers
+# =============================================================================
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _normalize_fetch_output(d: Any) -> Dict[str, Any]:
+    """
+    Normaliza a saída do fetch:
+    - Se vier float/int: gera ts_utc=agora e price_usd=float(valor)
+    - Se vier dict: exige price_usd e opcionalmente usa ts_utc fornecido
+    """
+    if isinstance(d, dict):
+        ts = d.get("ts_utc") or _now_iso()
+        price = float(d["price_usd"])
+        return {"ts_utc": ts, "price_usd": price}
+    # float/int
+    return {"ts_utc": _now_iso(), "price_usd": float(d)}
+
+
+# =============================================================================
 # Startup
 # =============================================================================
 @app.on_event("startup")
@@ -99,12 +119,8 @@ def _startup():
     try:
         init_db()
         log.info("DB inicializado com sucesso")
-    except Exception:  # pragma: no cover
+    except Exception:
         log.exception("Falha ao inicializar DB")
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 # =============================================================================
@@ -117,11 +133,13 @@ def root():
 
 @app.post("/ingest", response_model=IngestResp, tags=["default"], summary="Ingest Once")
 def ingest_once():
-    """Coleta preço atual (CoinGecko) e persiste (upsert por ts_utc)."""
+    """Coleta preço atual e persiste (upsert por ts_utc)."""
     try:
-        p = fetch_btc_price()  # {ts_utc, price_usd}
+        raw = fetch_btc_price()
+        p = _normalize_fetch_output(raw)  # garante ts_utc e price_usd
+        # ordem correta: ts primeiro, price depois
         upsert_price(p["ts_utc"], p["price_usd"])
-        return IngestResp(status="ok", ts_utc=p["ts_utc"], price_usd=float(p["price_usd"]))
+        return IngestResp(status="ok", ts_utc=p["ts_utc"], price_usd=p["price_usd"])
     except Exception as e:
         log.exception("Falha no ingest_once")
         return IngestResp(status="error", msg=str(e))
@@ -134,7 +152,7 @@ def train():
     Retorna acurácia de teste e número de amostras.
     """
     try:
-        res = train_model()  # usa sua função já existente
+        res = train_model()
         return TrainResp(**res)
     except Exception as e:
         log.exception("Falha no treino")
@@ -144,11 +162,31 @@ def train():
 @app.get("/predict", response_model=PredictResp, tags=["default"], summary="Predict")
 def predict():
     """
-    Prediz probabilidade de alta nos próximos 5 minutos (contrato do seu predict.py).
+    Prediz probabilidade de alta nos próximos 5 minutos (se disponível).
+    Usa predict_next(payload) quando presente. Fallback: retorna mensagem.
     """
     try:
-        res = predict_next()  # deve retornar {"status":"ok","proba_up_next_5":...}
-        return PredictResp(**res)
+        if _predict_next is None:
+            return PredictResp(status="error", msg="predict_next indisponível no servidor.")
+
+        # payload mínimo: horizon=5 (ajuste se necessário)
+        payload = {"horizon": 5}
+        res: Dict[str, Any] = _predict_next(payload)
+
+        # Tente mapear saídas comuns
+        if "proba_up_next_5" in res:
+            return PredictResp(status="ok", proba_up_next_5=float(res["proba_up_next_5"]))
+
+        # Alguns modelos retornam lista 'prediction' (prob ou valor)
+        if "prediction" in res and isinstance(res["prediction"], list) and res["prediction"]:
+            try:
+                return PredictResp(status="ok", proba_up_next_5=float(res["prediction"][0]))
+            except Exception:
+                pass
+
+        # fallback: apenas confirme que rodou
+        return PredictResp(status=res.get("status", "ok"), msg=res.get("msg", "predict_next executado."))
+
     except Exception as e:
         log.exception("Falha na predição")
         return PredictResp(status="error", msg=str(e))
@@ -156,7 +194,7 @@ def predict():
 
 @app.get("/data/last", response_model=ListResp, tags=["default"], summary="Last")
 def last(n: int = Query(300, ge=1, le=5000)):
-    """Retorna as últimas N leituras de preço ordenadas por timestamp."""
+    """Retorna as últimas N leituras de preço ordenadas por timestamp (ASC)."""
     try:
         with engine.begin() as c:
             rows = c.execute(
@@ -172,7 +210,7 @@ def last(n: int = Query(300, ge=1, le=5000)):
             ).mappings().all()
         data = [Row(ts_utc=r["ts_utc"], price_usd=float(r["price_usd"])) for r in rows]
         return ListResp(status="ok", data=data)
-    except Exception as e:
+    except Exception:
         log.exception("Falha em /data/last")
         return ListResp(status="error", data=[])
 
@@ -181,54 +219,49 @@ def last(n: int = Query(300, ge=1, le=5000)):
 # Batch server-side (coleta em lote)
 # =============================================================================
 BATCH_STATE: Dict[str, Any] = {
-    "running": False,      # loop ativo
-    "done": 0,             # coletas com sucesso
-    "fail": 0,             # falhas
-    "target": 0,           # total desejado
-    "delay": None,         # intervalo (s)
-    "started_at": None,    # ISO UTC início
-    "updated_at": None,    # ISO UTC última atualização
-    "last_error": None,    # última exceção textual
+    "running": False,
+    "done": 0,
+    "fail": 0,
+    "target": 0,
+    "delay": None,
+    "started_at": None,
+    "updated_at": None,
+    "last_error": None,
 }
 _BS_LOCK = threading.Lock()
 
 
 def _run_batch(n: int, delay: float) -> None:
-    with _BS_LOCK:
-        BATCH_STATE.update(
-            {
-                "running": True,
-                "done": 0,
-                "fail": 0,
-                "target": int(n),
-                "delay": float(delay),
-                "started_at": _now_iso(),
-                "updated_at": _now_iso(),
-                "last_error": None,
-            }
-        )
+    def _set(**kw):
+        with _BS_LOCK:
+            BATCH_STATE.update(kw)
+            BATCH_STATE["updated_at"] = _now_iso()
+
+    _set(
+        running=True,
+        done=0,
+        fail=0,
+        target=int(n),
+        delay=float(delay),
+        started_at=_now_iso(),
+        last_error=None,
+    )
 
     for _ in range(int(n)):
         with _BS_LOCK:
             if not BATCH_STATE["running"]:
                 break
         try:
-            price = fetch_btc_price()
-            upsert_price(price["ts_utc"], price["price_usd"])
-            with _BS_LOCK:
-                BATCH_STATE["done"] += 1
-                BATCH_STATE["updated_at"] = _now_iso()
-        except Exception as e:  # pragma: no cover
+            raw = fetch_btc_price()
+            p = _normalize_fetch_output(raw)
+            upsert_price(p["ts_utc"], p["price_usd"])  # ordem correta
+            _set(done=BATCH_STATE["done"] + 1)
+        except Exception as e:
             log.exception("Falha em uma iteração do batch")
-            with _BS_LOCK:
-                BATCH_STATE["fail"] += 1
-                BATCH_STATE["last_error"] = str(e)
-                BATCH_STATE["updated_at"] = _now_iso()
+            _set(fail=BATCH_STATE["fail"] + 1, last_error=f"{type(e).__name__}: {e}")
         polite_sleep(delay)
 
-    with _BS_LOCK:
-        BATCH_STATE["running"] = False
-        BATCH_STATE["updated_at"] = _now_iso()
+    _set(running=False)
 
 
 @app.post(
@@ -293,4 +326,3 @@ def batch_reset():
             }
         )
     return {"status": "reset", **BATCH_STATE}
-
