@@ -1,59 +1,45 @@
-from fastapi import FastAPI, BackgroundTasks
-from datetime import datetime, timezone
-from .ingestor import fetch_btc_price, polite_sleep
-from .db import init_db, upsert_price
+# app/api.py (trecho)
+from fastapi import FastAPI, BackgroundTasks, Query
+from time import sleep
+from app.ingestor import fetch_btc_price, polite_sleep
+from app.db import upsert_price
 
-app = FastAPI(title="CryptoPulse")
-
+app = FastAPI()
 BATCH_STATE = {"running": False, "done": 0, "fail": 0, "target": 0}
 
-@app.on_event("startup")
-def _startup():
-    init_db()
-
-@app.get("/")
-def health():
-    return {"ok": True, "service": "CryptoPulse"}
-
-@app.post("/ingest")
-def ingest():
-    try:
-        price = fetch_btc_price()
-        ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        upsert_price(ts, price)
-        return {"status": "ok", "ts_utc": ts, "price_usd": price}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-# -------- LOTE SERVER-SIDE ----------
-def _run_batch(count: int, delay: float):
-    BATCH_STATE.update({"running": True, "done": 0, "fail": 0, "target": count})
-    for i in range(count):
+def _run_batch(n: int, delay: float):
+    BATCH_STATE.update({"running": True, "done": 0, "fail": 0, "target": n})
+    for i in range(n):
+        if not BATCH_STATE["running"]:
+            break
         try:
             price = fetch_btc_price()
-            ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-            upsert_price(ts, price)
+            upsert_price(price["ts_utc"], price["price_usd"])
             BATCH_STATE["done"] += 1
-        except Exception as e:
+        except Exception:
             BATCH_STATE["fail"] += 1
         polite_sleep(delay)
     BATCH_STATE["running"] = False
 
 @app.post("/ingest_batch")
-def ingest_batch(count: int = 60, delay: float = 12.0, bg: BackgroundTasks = None):
-    # warm-up: primeira chamada já “acorda” o Render
-    if BATCH_STATE.get("running"):
+def ingest_batch(count: int = Query(60, ge=1, le=1000), delay: float = Query(12.0, ge=1.0)):
+    if BATCH_STATE["running"]:
         return {"status": "already_running", **BATCH_STATE}
+    from fastapi import BackgroundTasks
+    bg = BackgroundTasks()
     bg.add_task(_run_batch, count, delay)
-    return {"status": "started", "count": count, "delay": delay}
+    # FastAPI: retorne a tarefa *ou* simplesmente dispare e retorne ok
+    _ = bg  # se preferir gerenciar manualmente
+    import threading
+    threading.Thread(target=_run_batch, args=(count, delay), daemon=True).start()
+    return {"status": "started", "target": count, "delay": delay}
 
 @app.get("/batch/status")
 def batch_status():
-    return {"status": "running" if BATCH_STATE["running"] else "idle", **BATCH_STATE}
+    return {"status": "ok", **BATCH_STATE}
 
 @app.post("/batch/stop")
 def batch_stop():
-    # simples: marca target = done para encerrar loop na próxima iteração
-    if BATCH_STATE["running"]:
-        BATCH_STATE["target"] = BATCH_STATE["done"]  # encerra
-    return {"status": "stopping"}
+    BATCH_STATE["running"] = False
+    return {"status": "stopping", **BATCH_STATE}
+
