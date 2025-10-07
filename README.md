@@ -15,15 +15,18 @@ Sumário
 12. Testes
 
 1. Contexto e objetivo
+   
 Este repositório implementa um tech challenge de Data/ML com as seguintes entregas: 
-API que coleta dados (quase em tempo real) e persiste em banco.
-Modelo de ML treinado a partir dessa base.
-Código + documentação no GitHub.
-Storytelling em vídeo explicando do problema à entrega final.
-Aplicação produtiva: um dashboard que consome os dados e o modelo.
+- API que coleta dados (quase em tempo real) e persiste em banco.
+- Modelo de ML treinado a partir dessa base.
+- Código + documentação no GitHub.
+- Storytelling em vídeo explicando do problema à entrega final.
+- Aplicação produtiva: um dashboard que consome os dados e o modelo.
 Tudo conforme o enunciado da Fase 3 do Tech Challenge.
+
 Problema proposto: prever a direção de preço do BTC nos próximos ~5 minutos (sobe/↓ desce), com atualizações rápidas de dados, para demonstrar um ciclo completo de dados → features → modelo → API → UI.
-2. Arquitetura
+
+3. Arquitetura
            +--------------------+
            |  CoinGecko API     |  (Preço BTC em USD)
            +---------+----------+
@@ -54,14 +57,14 @@ Coleta: endpoint /ingest busca o preço atual do BTC (CoinGecko) e grava uma lin
 Treino: /train calcula features, treina uma Logistic Regression e salva models/model.pkl.
 Predição: /predict retorna a probabilidade de alta nos próximos 5 “passos” (janelas consecutivas).
 Dashboard: consulta a API, plota a série e exibe a última predição.
-3. Fonte de dados
+4. Fonte de dados
 CoinGecko — endpoint público /simple/price para bitcoin em USD (sem API key).
 Frequência de coleta: 
 a) manual (botão no dashboard ou POST /ingest). 
 b) coletar em lote: ideal para juntar rapidamente 60–100 amostras e treinar. Mostro progresso, sucesso/falha e tempo total.
 Observação: “tempo real” aqui significa near-real-time por simplicidade (coletas frequentes via chamadas à API).
 Opção de Auto-refresh, controle na sidebar; quando ativo, a página se atualiza no intervalo escolhido e o gráfico/último preço se renovam.
-4. Requisitos de ambiente
+5. Requisitos de ambiente
 Python: 3.13 (macOS arm64 suportado).
 SO: macOS 12+ / Linux / WSL2 (testado em macOS).
 Bibliotecas principais: FastAPI, SQLAlchemy, requests, pandas, numpy, scikit-learn, Streamlit, plotly.
