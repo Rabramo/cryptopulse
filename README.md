@@ -8,7 +8,7 @@
 ### DASHBOARD: https://rabramo-cryptopulse-dashboardstreamlit-app-fvrftu.streamlit.app
 ### API: https://cryptopulse-okqa.onrender.com
 ### API DOCS: https://cryptopulse-okqa.onrender.com/docs
-### YOUTUBE: https://youtube.com/@rabramo2008?si=T_Y0Oy0xRUHvFl64
+### YOUTUBE: YOUTUBE: https://youtu.be/olFDYlEHgv4 
 
 ## CRYPTOPULSE – BTC Nowcasting (FastAPI + Render + Neon + Streamlit Cloud)
 
