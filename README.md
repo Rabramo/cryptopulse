@@ -6,9 +6,8 @@
 É apenas um hands on de avalição acadêmcia, não utilizar para trading real. 
 
 ### DASHBOARD: https://rabramo-cryptopulse-dashboardstreamlit-app-fvrftu.streamlit.app
-### GITHUB: https://github.com/Rabramo/cryptopulse  
 ### API DOCS: https://cryptopulse-okqa.onrender.com/docs
-### YOUTUBE: 
+### YOUTUBE: https://youtube.com/@rabramo2008?si=T_Y0Oy0xRUHvFl64
 
 ## CRYPTOPULSE – BTC Nowcasting (FastAPI + Render + Neon + Streamlit Cloud)
 
