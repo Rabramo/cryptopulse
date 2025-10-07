@@ -1,0 +1,34 @@
+ESTRUTURA DO PROJETO
+
+cryptopulse/
+├─ .github/
+│  └─ workflows/
+│     └─ ci.yml                    # CI: lint (ruff), format check (black), tests (pytest) e smoke (Render)
+│
+├─ app/                            # Backend FastAPI (API + ML + ingestão + DB)
+│  ├─ __init__.py                  # torna 'app' um pacote Python
+│  ├─ api.py                       # Endpoints: health, ingest, ingest_batch, batch status/stop, train, predict, data/last
+│  ├─ db.py                        # Engine SQLAlchemy (Postgres/Neon), init_db(), upsert_price() com ON CONFLICT
+│  ├─ ingestor.py                  # Coleta BTC (requests.Session + Retry exponencial, User-Agent, Retry-After)
+│  ├─ features.py                  # Criação de features a partir da série de preços
+│  ├─ train.py                     # Treino (scikit-learn) — exige mínimo de 120 amostras; salva em models/model.pkl
+│  ├─ predict.py                   # Carrega modelo salvo e calcula probabilidade de alta (5 min)
+│  └─ utils.py                     # Utilidades (datas, helpers variados)
+│
+├─ dashboard/
+│  └─ streamlit_app.py             # UI Streamlit (DS Gov + Font Awesome). Lote executa no servidor via /ingest_batch
+│
+|- data/
+|  └─ .gitkeep                     # Placeholder para versionar a pasta 
+|
+├─ models/
+│  └─ .gitkeep                     # Placeholder para versionar a pasta 
+│
+├─ tests/
+│  └─ test_smoke.py                # Smoke básico (imports/contratos) que roda no CI
+│
+├─ .gitignore                      # Ignora venv, caches, DB local, artefatos etc.
+├─ Makefile                        # make dash → roda Streamlit apontando para a API no Render
+├─ README.md                       # Este documento
+├─ README_DEPLOY.md                # Guia de deploy (Render + Streamlit Cloud)
+└─ requirements.txt                # Dependências (FastAPI, SQLAlchemy, scikit-learn, Streamlit, Plotly, etc.)

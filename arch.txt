@@ -1,0 +1,179 @@
+┌───────────────────────────┐
+│         Usuários          │
+│      (navegador web)      │
+└─────────────┬─────────────┘
+              │ HTTPS
+              ▼
+┌──────────────────────────────────┐
+│  🟩 Streamlit Cloud (Dashboard)  │
+│  API_BASE → https://...render..  │
+└─────────────┬────────────────────┘
+              │ HTTP/JSON
+              ▼
+┌───────────────────────────────────────────────────────────────┐
+│  🟧 FastAPI (Render)                                           │
+│  uvicorn app.api:app   •   CORS: https://*.streamlit.app      │
+│  Endpoints: /ingest, /ingest_batch, /batch/status, /batch/stop│
+│             /data/last, /train, /predict, /                  │
+└─────────────┬───────────────────────┬─────────────────────────┘
+              │ DB_URL (psycopg3+SSL) │ /ingest (coleta preço)
+              ▼                       ▼
+┌──────────────────────────┐   ┌──────────────────────────┐
+│  🟨 Neon PostgreSQL       │   │  🟦 CoinGecko API        │
+│  pooler gerenciado (SSL) │   │  /simple/price (BTC/USD) │
+└──────────────────────────┘   └──────────────────────────┘
+
+
+                    (CI/CD)
+┌──────────────────────────┐        push/pull request        ┌──────────────────────────┐
+│  🟥 GitHub Repo (main)    │ ─────────────────────────────▶ │  🟪 GitHub Actions (CI)  │
+│  fonte do código          │                                │  ci.yml: ruff+black+pytest│
+└───────────────┬───────────┘                                │  + smoke: GET "/" na API │
+                │ Git Provider                               └───────────────┬──────────┘
+                ▼                                                          smoke ┃
+┌──────────────────────────┐                                             (curl) ▼
+│   ⬜ Render (Deploy)      │ ◀──────────────────────────────────────────────────┘
+│   build & publicar       │
+└──────────────────────────┘
+           │
+           ▼
+   (publica/atualiza)
+   🟧 FastAPI (Render)
+
+
+========================
+CryptoPulse – Arquitetura
+========================
+
+1) Visão Geral
+--------------
+- Frontend: Streamlit Cloud (dashboard público) ou local.
+- Backend: FastAPI hospedado no Render (serviço web).
+- Banco de Dados: Neon PostgreSQL (pooler gerenciado, SSL).
+- Fonte de Dados: CoinGecko /simple/price (BTC/USD).
+- ML: scikit-learn (pipeline simples, modelo salvo em models/model.pkl).
+- CI: GitHub Actions (ci.yml) com lint (ruff), format check (black), testes (pytest) e smoke (GET / na API do Render).
+
+2) Fluxo (alto nível)
+---------------------
+Usuário -> (HTTPS) Streamlit -> (HTTP/JSON) FastAPI -> (SQLAlchemy) Postgres
+                                     |
+                                     +-> CoinGecko (coleta preço)
+
+Batch de coleta roda no SERVIDOR (FastAPI) como background task.
+Dashboard apenas inicia e acompanha o progresso (não dispara N POSTS).
+
+3) Endpoints (FastAPI)
+----------------------
+GET    /                      -> Health: {"ok": true, "service": "CryptoPulse"}
+POST   /ingest                -> Coleta 1 leitura (CoinGecko) e faz upsert no DB
+POST   /ingest_batch          -> Inicia batch no servidor (parâmetros: count, delay)
+GET    /batch/status          -> Retorna estado do batch: {running, done, fail, target}
+POST   /batch/stop            -> Solicita parada graciosa do batch
+GET    /data/last?n=300       -> Últimas n leituras (para o dashboard)
+POST   /train                 -> Treina o modelo (mínimo 120 amostras); salva model.pkl
+GET    /predict               -> Probabilidade de alta (janela de 5 min)
+
+Notas:
+- /ingest_batch roda um loop N vezes com "delay + jitter".
+- /batch/status é idempotente; pode ser chamado com frequência pelo dashboard.
+
+4) Banco de Dados (Neon Postgres)
+---------------------------------
+Tabelas:
+- prices(ts_utc TEXT PRIMARY KEY, price_usd REAL NOT NULL)
+- meta  (k TEXT PRIMARY KEY, v TEXT)
+
+Observações:
+- Upsert: INSERT ... ON CONFLICT (ts_utc) DO NOTHING
+- Conexão: SQLAlchemy engine com pool_pre_ping=True, pool_recycle=180.
+- URL: postgresql+psycopg://USER:PASSWORD@HOST/neondb?sslmode=require
+
+5) Ingestão (app/ingestor.py)
+-----------------------------
+- requests.Session com Retry exponencial (429, 500, 502, 503, 504).
+- backoff_factor ~0.7; respeita Retry-After quando presente.
+- User-Agent próprio ("CryptoPulse/1.0 ...").
+- polite_sleep(delay, jitter=±0.25s) para evitar bursts.
+
+6) Batch Server-side
+--------------------
+- Iniciado por POST /ingest_batch?count=N&delay=S
+- Executa como background task no processo do FastAPI (Render).
+- Estado em memória (BATCH_STATE: running/done/fail/target).
+- /batch/stop ajusta target para encerrar o loop logo após a iteração atual.
+- O dashboard apenas acompanha com GET /batch/status.
+
+7) Treino/Predição (ML)
+-----------------------
+- Mínimo de 120 observações (senão retorna "not_enough_data").
+- Pipeline: StandardScaler + LogisticRegression (max_iter=1000).
+- Split temporal: train/test com shuffle=False.
+- Artefato salvo em models/model.pkl.
+- Predict carrega artefato; retorna probabilidade de alta (horizonte 5 min).
+
+8) UI (Streamlit)
+-----------------
+- Design System Gov.br (cores/tipografia Roboto) + ícones Font Awesome (em rótulos).
+- API_BASE:
+  - Produção: vem de Secrets (Streamlit Cloud) e fica travado (read-only).
+  - Local: var de ambiente API_BASE ou .streamlit/secrets.toml.
+- Botões principais: Coletar agora, Treinar, Iniciar/Parar lote, Predizer.
+- Gráfico: Plotly (linha, cores DS Gov), métrica do último preço.
+- Auto-refresh opcional (slider de intervalo).
+
+9) CI (GitHub Actions)
+----------------------
+Arquivo: .github/workflows/ci.yml
+- Python 3.11 (recomendado para wheels compatíveis).
+- Instala requirements + ruff + black.
+- ruff check, black --check, pytest -q.
+- Smoke opcional: curl GET / na API do Render (usa secret RENDER_API_BASE).
+- Concurrency: cancela pipelines antigos da mesma branch.
+
+10) Makefile (dev local do dashboard)
+-------------------------------------
+- Objetivo principal: "make dash" para rodar Streamlit local usando API do Render.
+- Variáveis:
+  - RENDER_API_BASE=https://cryptopulse-okqa.onrender.com
+  - PORT=8501
+- Comando:
+  API_BASE=$(RENDER_API_BASE) streamlit run dashboard/streamlit_app.py --server.port $(PORT)
+
+11) Variáveis de Ambiente / Secrets
+-----------------------------------
+API (Render):
+- DB_URL = postgresql+psycopg://USER:PASSWORD@HOST/neondb?sslmode=require
+
+Dashboard (Streamlit Cloud) – Secrets:
+- API_BASE = "https://cryptopulse-okqa.onrender.com"
+
+CI (GitHub) – Secrets:
+- RENDER_API_BASE = "https://cryptopulse-okqa.onrender.com"  (para smoke opcional)
+
+12) Portas, CORS e Segurança
+----------------------------
+- FastAPI (Render) exposto via HTTPS pelo próprio Render.
+- CORS configurado para aceitar https://*.streamlit.app (dashboard público).
+- Banco com SSL (sslmode=require).
+- Nunca versionar secrets:
+  - Não comitar .streamlit/secrets.toml em repositórios públicos.
+  - DB_URL somente como ambiente no Render.
+
+13) Limites e Resiliência
+-------------------------
+- CoinGecko tem rate limits; usar delay >= 12s em batch (ajustável).
+- Retry com backoff para 429/5xx reduce falhas transitórias.
+- Render free pode "hibernar"; o dashboard faz healthcheck/warm-up.
+
+14) Operação (Resumo)
+---------------------
+- Coleta manual: POST /ingest (via botão ou curl).
+- Coleta em lote: POST /ingest_batch (N, delay); monitorar /batch/status.
+- Treino: POST /train (após ≥ 120 leituras).
+- Predição: GET /predict.
+- Dashboard: Streamlit consumindo a API pública do Render.
+
+
+Fim
+
