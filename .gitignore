@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.db
+*.log
+.DS_Store
+.env
+.env.*
+.ipynb_checkpoints/
+data/*.db
+models/*.pkl
+.streamlit/
